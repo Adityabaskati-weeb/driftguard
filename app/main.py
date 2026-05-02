@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -52,7 +52,7 @@ async def health():
 
 
 @app.get("/", response_class=HTMLResponse, tags=["Dashboard"])
-async def dashboard():
+async def dashboard(request: Request):
     """Serve the main dashboard HTML."""
     report = get_report_data()
     
@@ -87,7 +87,7 @@ async def dashboard():
         """
     
     # Render dashboard with report data
-    return templates.TemplateResponse("dashboard.html", {"request": None, "report": report})
+    return templates.TemplateResponse("dashboard.html", {"request": request, "report": report})
 
 
 @app.get("/api/report", tags=["API"])
@@ -125,11 +125,11 @@ async def startup_event():
     host = Config.FASTAPI_HOST
     print()
     print("=" * 70)
-    print("🔍 DriftGuard Dashboard")
+    print("DriftGuard Dashboard")
     print("=" * 70)
-    print(f"📊 Dashboard: http://{host}:{port}/")
-    print(f"📡 API: http://{host}:{port}/api/report")
-    print(f"📚 Docs: http://{host}:{port}/docs")
+    print(f"Dashboard: http://{host}:{port}/")
+    print(f"API: http://{host}:{port}/api/report")
+    print(f"Docs: http://{host}:{port}/docs")
     print("=" * 70)
     print()
 

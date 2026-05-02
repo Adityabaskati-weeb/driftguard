@@ -15,12 +15,14 @@ from pathlib import Path
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 
-from app.git_parser import get_file_diffs
+from app.git_parser import get_file_diffs, resolve_repo, _fetch_github_repo_diffs
 from app.bob_analyzer import batch_analyze
 from app.scorer import score_all_files
 from app.report_generator import generate_report, save_report, print_report_summary
+from app.report_exporter import export_report
 from app.db import initialize_db, save_run
 from app.alert_manager import AlertManager
+from app.remediation import generate_remediations_for_files
 
 
 # Global flag for graceful shutdown
@@ -126,15 +128,16 @@ def parse_interval(interval_str: str) -> int:
 
 
 def run_analysis(repo: str, days: int, max_files: int, output: str = None,
-                 logger: logging.Logger = None) -> dict:
+                 logger: logging.Logger = None, github_token: str = None) -> dict:
     """Run a single analysis cycle.
     
     Args:
-        repo: Path to git repository
+        repo: Path to git repository or GitHub URL
         days: Days of history to analyze
         max_files: Maximum files to analyze
         output: Optional output file path
         logger: Optional logger instance
+        github_token: Optional GitHub token for API access
         
     Returns:
         Generated report dict
@@ -144,9 +147,18 @@ def run_analysis(repo: str, days: int, max_files: int, output: str = None,
     
     logger.info(f"Starting analysis: repo={repo}, days={days}, max_files={max_files}")
     
-    # Step 1: Extract git diffs
+    # Step 1: Resolve repository (local, GitHub, or other remote)
     try:
-        file_diffs = get_file_diffs(repo, days)
+        repo_data, is_remote = resolve_repo(repo, github_token)
+        
+        # If it's a GitHub repo, fetch diffs via API
+        if is_remote:
+            owner, repo_name, token = repo_data
+            logger.info(f"Fetching data from GitHub API: {owner}/{repo_name}")
+            file_diffs = _fetch_github_repo_diffs(owner, repo_name, days, token)
+        else:
+            # Local repo or cloned repo
+            file_diffs = get_file_diffs(repo_data, days)
     except Exception as e:
         logger.error(f"Error reading repository: {e}")
         raise
@@ -198,15 +210,16 @@ def run_analysis(repo: str, days: int, max_files: int, output: str = None,
 
 
 def watcher(repo: str, days: int, max_files: int, interval_seconds: int,
-            alert_config: dict = None):
+            alert_config: dict = None, github_token: str = None):
     """Run continuous analysis with scheduled intervals.
     
     Args:
-        repo: Path to git repository
+        repo: Path to git repository or GitHub URL
         days: Days of history to analyze
         max_files: Maximum files to analyze
         interval_seconds: Seconds between analysis runs
         alert_config: Optional alert configuration dict
+        github_token: Optional GitHub token for API access
     """
     global shutdown_requested
     
@@ -242,7 +255,7 @@ def watcher(repo: str, days: int, max_files: int, interval_seconds: int,
         
         try:
             # Run analysis
-            report = run_analysis(repo, days, max_files, logger=logger)
+            report = run_analysis(repo, days, max_files, logger=logger, github_token=github_token)
             
             if report:
                 # Save to database
@@ -284,13 +297,18 @@ def watcher(repo: str, days: int, max_files: int, interval_seconds: int,
 
 def main():
     parser = argparse.ArgumentParser(description="DriftGuard - Codebase Decay Monitor")
-    parser.add_argument("--repo", default=".", help="Path to git repository (default: .)")
+    parser.add_argument("--repo", default=".", help="Path to git repository or GitHub URL (default: .)")
     parser.add_argument("--days", type=int, default=30, help="Days of history to analyze (default: 30)")
     parser.add_argument("--output", default=None, help="Output JSON file path (auto-generated if not provided)")
     parser.add_argument("--max-files", type=int, default=20, help="Max files to analyze (default: 20)")
     parser.add_argument("--verbose", action="store_true", help="Print raw analysis details")
     parser.add_argument("--watch", action="store_true", help="Run in watch mode with scheduled intervals")
     parser.add_argument("--interval", default="24h", help="Watch mode interval (e.g., '24h', '30m', '3600')")
+    parser.add_argument("--github-token", default=None, help="GitHub token for API access (overrides GITHUB_TOKEN env var)")
+    parser.add_argument("--export", default="json", choices=["json", "markdown", "pdf", "all"],
+                        help="Export format: json, markdown, pdf, or all (default: json)")
+    parser.add_argument("--remediate", action="store_true",
+                        help="Generate remediation files for CRITICAL and AT_RISK files")
     
     args = parser.parse_args()
     
@@ -303,17 +321,26 @@ def main():
             sys.exit(1)
         
         # Run watcher
-        watcher(args.repo, args.days, args.max_files, interval_seconds)
+        watcher(args.repo, args.days, args.max_files, interval_seconds, github_token=args.github_token)
         sys.exit(0)
     
     print("\n" + "=" * 70)
     print("🔍 DriftGuard — Codebase Decay Monitor")
     print("=" * 70)
     
-    # Step 1: Extract git diffs
+    # Step 1: Resolve repository and extract git diffs
     print(f"\n📂 Scanning {args.repo} for last {args.days} days of changes...")
     try:
-        file_diffs = get_file_diffs(args.repo, args.days)
+        repo_data, is_remote = resolve_repo(args.repo, args.github_token)
+        
+        # If it's a GitHub repo, fetch diffs via API
+        if is_remote:
+            owner, repo_name, token = repo_data
+            print(f"Using GitHub API for {owner}/{repo_name}")
+            file_diffs = _fetch_github_repo_diffs(owner, repo_name, args.days, token)
+        else:
+            # Local repo or cloned repo
+            file_diffs = get_file_diffs(repo_data, args.days)
     except Exception as e:
         print(f"❌ Error reading repository: {e}")
         sys.exit(1)
@@ -357,7 +384,7 @@ def main():
         print(f"❌ Error generating report: {e}")
         sys.exit(1)
     
-    # Step 5: Save report
+    # Step 5: Save report (JSON by default)
     try:
         report_path = save_report(report, args.output)
     except Exception as e:
@@ -365,6 +392,39 @@ def main():
         sys.exit(1)
     
     print(f"✅ Report saved to {report_path}")
+    
+    # Step 6: Export to additional formats if requested
+    if args.export != "json":
+        print(f"\n📄 Exporting report in {args.export} format...")
+        try:
+            export_result = export_report(report, args.export, output_dir="output")
+            print(f"✅ {export_result}")
+        except ImportError as e:
+            print(f"⚠️  Export failed: {e}")
+            print("   Install weasyprint for PDF export: pip install weasyprint")
+        except Exception as e:
+            print(f"❌ Error exporting report: {e}")
+    
+    # Step 7: Generate remediation files if requested
+    if args.remediate:
+        print("\n🔧 Generating remediation files...")
+        try:
+            # Initialize database connection
+            initialize_db()
+            import sqlite3
+            db_conn = sqlite3.connect("data/driftguard.db")
+            
+            try:
+                remediation_count = generate_remediations_for_files(
+                    scored_files,
+                    args.repo,
+                    db_conn
+                )
+                print(f"✅ Generated {remediation_count} remediation files in remediation/")
+            finally:
+                db_conn.close()
+        except Exception as e:
+            print(f"❌ Error generating remediation files: {e}")
     
     # Print summary
     print_report_summary(report)

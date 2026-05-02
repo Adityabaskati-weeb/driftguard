@@ -9,6 +9,7 @@ from typing import List, Dict, Optional
 from app.models import FileDiff, AnalysisResult
 from app.config import Config
 from app.baseline_profile import load_baseline, format_baseline_summary
+from app.language_prompts import get_language_prompt, get_focus_areas, get_complexity_indicators
 
 # Global baseline cache
 _baseline_cache: Optional[Dict] = None
@@ -70,7 +71,7 @@ def analyze_file_decay(file_data: Dict) -> Dict:
     lowest_score = scores[lowest_dimension]
     
     top_risk, recommendation = _generate_risk_and_recommendation(
-        lowest_dimension, lowest_score, file_path
+        lowest_dimension, lowest_score, file_path, language
     )
     
     # Generate decay summary
@@ -149,6 +150,7 @@ def _calculate_documentation_drift_score(diff_text: str, language: str) -> int:
     
     Rule: If added 50+ lines with 0 comments/docstrings → 20, else 70+
     Uses baseline docstring coverage to adjust expectations.
+    Language-specific patterns applied based on language_prompts.
     """
     lines = diff_text.split('\n')
     added_lines = [line for line in lines if line.startswith('+') and not line.startswith('+++')]
@@ -164,12 +166,14 @@ def _calculate_documentation_drift_score(diff_text: str, language: str) -> int:
     baseline = get_baseline()
     baseline_doc_coverage = baseline.get('docstring_coverage_pct', 50.0) if baseline else 50.0
     
-    # Count added comments/docstrings
+    # Count added comments/docstrings with language-specific patterns
     comment_patterns = {
         'python': [r'^\+\s*#', r'^\+\s*"""', r"^\+\s*'''"],
         'javascript': [r'^\+\s*//', r'^\+\s*/\*', r'^\+\s*\*'],
         'typescript': [r'^\+\s*//', r'^\+\s*/\*', r'^\+\s*\*'],
         'java': [r'^\+\s*//', r'^\+\s*/\*', r'^\+\s*\*'],
+        'go': [r'^\+\s*//', r'^\+\s*/\*', r'^\+\s*\*'],
+        'ruby': [r'^\+\s*#', r'^\+\s*=begin'],
     }
     
     patterns = comment_patterns.get(language, [r'^\+\s*#', r'^\+\s*//'])
@@ -249,12 +253,19 @@ def _calculate_complexity_growth_score(diff_text: str, language: str) -> int:
     Score: 0-100 (higher = better complexity management)
     
     Rule: Count indentation/nesting increases. High increase → 40, else 70+
+    Uses language-specific thresholds from Config.LANGUAGE_THRESHOLDS.
     """
     lines = diff_text.split('\n')
     added_lines = [line for line in lines if line.startswith('+') and not line.startswith('+++')]
     
     if not added_lines:
         return 100  # No changes
+    
+    # Get language-specific thresholds
+    lang_thresholds = Config.LANGUAGE_THRESHOLDS.get(language, Config.LANGUAGE_THRESHOLDS.get('python', {}))
+    max_function_lines = lang_thresholds.get('max_function_lines', 50)
+    max_nesting_depth = lang_thresholds.get('max_nesting_depth', 4)
+    complexity_threshold = lang_thresholds.get('complexity_threshold', 150)
     
     # Measure nesting depth increases
     max_nesting = 0
@@ -295,18 +306,16 @@ def _calculate_complexity_growth_score(diff_text: str, language: str) -> int:
         else:
             consecutive_adds = 0
     
-    # Scoring based on complexity indicators
-    threshold = Config.RULE_COMPLEXITY_NESTING_THRESHOLD
-    
-    if max_nesting > threshold + 3:  # Very deep nesting (5+ levels)
+    # Scoring based on language-specific complexity indicators
+    if max_nesting > max_nesting_depth + 2:  # Very deep nesting
         return 30
-    elif max_nesting > threshold + 1:  # Deep nesting (3-4 levels)
+    elif max_nesting > max_nesting_depth:  # Deep nesting
         return 50
-    elif max_consecutive > 100:  # Very long function addition
+    elif max_consecutive > max_function_lines * 2:  # Very long function addition
         return 45
-    elif max_consecutive > 50:  # Long function addition
+    elif max_consecutive > max_function_lines:  # Long function addition
         return 60
-    elif avg_nesting > 2:  # Moderate average nesting
+    elif avg_nesting > max_nesting_depth - 1:  # Moderate average nesting
         return 70
     else:
         return 85  # Good complexity management
@@ -317,6 +326,7 @@ def _calculate_naming_consistency_score(diff_text: str, language: str) -> int:
     Score: 0-100 (higher = better naming consistency)
     
     Rule: Look for snake_case vs camelCase inconsistencies → 50-80 based on violations
+    Uses language-specific naming conventions from language_prompts.
     """
     lines = diff_text.split('\n')
     added_lines = [line for line in lines if line.startswith('+') and not line.startswith('+++')]
@@ -349,12 +359,14 @@ def _calculate_naming_consistency_score(diff_text: str, language: str) -> int:
     if baseline and baseline.get('dominant_naming_style'):
         style = baseline['dominant_naming_style']
     else:
-        # Language-specific conventions
+        # Language-specific conventions from language_prompts
         expected_style = {
             'python': 'snake_case',
             'javascript': 'camelCase',
             'typescript': 'camelCase',
             'java': 'camelCase',
+            'go': 'camelCase',
+            'ruby': 'snake_case',
         }
         style = expected_style.get(language, 'snake_case')
     
@@ -402,8 +414,17 @@ def _is_test_file(file_path: str) -> bool:
     return any(indicator in file_path.lower() for indicator in test_indicators)
 
 
-def _generate_risk_and_recommendation(dimension: str, score: int, file_path: str) -> tuple:
-    """Generate top risk and recommendation based on lowest scoring dimension."""
+def _generate_risk_and_recommendation(dimension: str, score: int, file_path: str, language: str = 'unknown') -> tuple:
+    """Generate top risk and recommendation based on lowest scoring dimension.
+    
+    Args:
+        dimension: The dimension with the lowest score
+        score: The score value
+        file_path: Path to the file
+        language: Programming language for context-specific recommendations
+    """
+    # Get language-specific focus areas for better recommendations
+    focus_areas = get_focus_areas(language)
     
     risk_templates = {
         'documentation': (

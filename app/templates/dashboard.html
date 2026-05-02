@@ -129,11 +129,28 @@
         <p>Codebase Decay Monitor</p>
         {% if report %}
         <p style="font-size: 0.85em; color: #888; margin-top: 12px;">
-          Repository: <strong>{{ report.repo }}</strong> | 
-          Last {{ report.analysis_window_days }} days | 
+          Repository: <strong>{{ report.repo }}</strong> |
+          Last {{ report.analysis_window_days }} days |
           Analyzed: <strong>{{ report.analyzed_at }}</strong>
         </p>
         {% endif %}
+        
+        <!-- Repository Selector -->
+        <div style="margin-top: 20px; text-align: center;">
+          <label for="repoSelector" style="color: #b0b8c8; margin-right: 10px; font-size: 0.9em;">Select Repository:</label>
+          <select id="repoSelector" style="
+            background: rgba(22, 33, 62, 0.8);
+            border: 1px solid rgba(0, 212, 255, 0.3);
+            border-radius: 4px;
+            padding: 8px 16px;
+            color: #e6eef8;
+            font-size: 0.9em;
+            cursor: pointer;
+            min-width: 200px;
+          ">
+            <option value="">Loading repositories...</option>
+          </select>
+        </div>
       </div>
 
       {% if report %}
@@ -231,6 +248,63 @@
     </div>
 
     <script>
+      // Repository selector functionality
+      const repoSelector = document.getElementById('repoSelector');
+      const API_KEY = localStorage.getItem('driftguard_api_key') || '';
+      
+      // Load repositories on page load
+      async function loadRepositories() {
+        if (!API_KEY) {
+          repoSelector.innerHTML = '<option value="">API key not configured</option>';
+          return;
+        }
+        
+        try {
+          const response = await fetch('/api/repos', {
+            headers: {
+              'X-DriftGuard-Key': API_KEY
+            }
+          });
+          
+          if (!response.ok) {
+            repoSelector.innerHTML = '<option value="">Failed to load repos</option>';
+            return;
+          }
+          
+          const data = await response.json();
+          const repos = data.repos || [];
+          
+          // Get selected repo from localStorage
+          const selectedRepo = localStorage.getItem('driftguard_selected_repo') || '';
+          
+          // Populate dropdown
+          repoSelector.innerHTML = repos.map(repo =>
+            `<option value="${repo.name}" ${repo.name === selectedRepo ? 'selected' : ''}>
+              ${repo.name} (Score: ${repo.avg_health_score})
+            </option>`
+          ).join('');
+          
+          // If no selection, select first repo
+          if (!selectedRepo && repos.length > 0) {
+            localStorage.setItem('driftguard_selected_repo', repos[0].name);
+          }
+        } catch (error) {
+          console.error('Error loading repositories:', error);
+          repoSelector.innerHTML = '<option value="">Error loading repos</option>';
+        }
+      }
+      
+      // Handle repo selection change
+      repoSelector.addEventListener('change', function() {
+        const selectedRepo = this.value;
+        localStorage.setItem('driftguard_selected_repo', selectedRepo);
+        // Reload page to fetch new repo data
+        window.location.reload();
+      });
+      
+      // Load repos on page load
+      loadRepositories();
+      
       {% if report %}
       // Chart.js configuration
       const ctx = document.getElementById('healthChart').getContext('2d');

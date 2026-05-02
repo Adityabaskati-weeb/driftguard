@@ -5,9 +5,34 @@ Analyzes file diffs using heuristics (no external APIs/LLMs).
 """
 
 import re
-from typing import List, Dict
+from typing import List, Dict, Optional
 from app.models import FileDiff, AnalysisResult
 from app.config import Config
+from app.baseline_profile import load_baseline, format_baseline_summary
+
+# Global baseline cache
+_baseline_cache: Optional[Dict] = None
+
+
+def set_baseline(repo_path: str) -> None:
+    """Load and cache baseline profile for the repository.
+    
+    Args:
+        repo_path: path to repository root
+    """
+    global _baseline_cache
+    _baseline_cache = load_baseline(repo_path)
+    
+    if _baseline_cache:
+        print(f"\n[BASELINE] Loaded baseline profile:")
+        print(format_baseline_summary(_baseline_cache))
+    else:
+        print("\n[BASELINE] No baseline profile found. Scores will use default thresholds.")
+
+
+def get_baseline() -> Optional[Dict]:
+    """Get cached baseline profile."""
+    return _baseline_cache
 
 
 def analyze_file_decay(file_data: Dict) -> Dict:
@@ -23,6 +48,9 @@ def analyze_file_decay(file_data: Dict) -> Dict:
     diff_text = file_data.get('diff_text', '')
     file_path = file_data.get('file_path', '')
     language = file_data.get('language', 'unknown')
+    
+    # Get baseline for context-aware scoring
+    baseline = get_baseline()
     
     # Calculate individual dimension scores
     doc_score = _calculate_documentation_drift_score(diff_text, language)
@@ -120,6 +148,7 @@ def _calculate_documentation_drift_score(diff_text: str, language: str) -> int:
     Score: 0-100 (higher = better documentation practices)
     
     Rule: If added 50+ lines with 0 comments/docstrings → 20, else 70+
+    Uses baseline docstring coverage to adjust expectations.
     """
     lines = diff_text.split('\n')
     added_lines = [line for line in lines if line.startswith('+') and not line.startswith('+++')]
@@ -130,6 +159,10 @@ def _calculate_documentation_drift_score(diff_text: str, language: str) -> int:
     
     if added_count == 0:
         return 100  # No changes, perfect score
+    
+    # Get baseline for context
+    baseline = get_baseline()
+    baseline_doc_coverage = baseline.get('docstring_coverage_pct', 50.0) if baseline else 50.0
     
     # Count added comments/docstrings
     comment_patterns = {
@@ -151,15 +184,24 @@ def _calculate_documentation_drift_score(diff_text: str, language: str) -> int:
     # Calculate documentation ratio
     doc_ratio = comment_count / added_count if added_count > 0 else 0
     
-    # Apply scoring rules
+    # Apply scoring rules with baseline adjustment
     threshold = Config.RULE_DOC_DRIFT_THRESHOLD_ADDED_LINES
     
+    # Adjust expectations based on baseline
+    # If repo has low baseline coverage, be more lenient
+    if baseline_doc_coverage < 30:
+        leniency = 10
+    elif baseline_doc_coverage < 50:
+        leniency = 5
+    else:
+        leniency = 0
+    
     if added_count >= threshold and comment_count == 0:
-        return 20  # Large change with no documentation
+        return max(20, 20 + leniency)  # Large change with no documentation
     elif added_count >= threshold and doc_ratio < 0.05:
-        return 40  # Large change with minimal documentation
+        return max(40, 40 + leniency)  # Large change with minimal documentation
     elif doc_ratio < 0.1:
-        return 60  # Some documentation but below 10%
+        return max(60, 60 + leniency)  # Some documentation but below 10%
     elif doc_ratio < 0.2:
         return 75  # Decent documentation (10-20%)
     else:
@@ -302,15 +344,19 @@ def _calculate_naming_consistency_score(diff_text: str, language: str) -> int:
     snake_case_count = sum(1 for name in identifiers if '_' in name and name.islower())
     camel_case_count = sum(1 for name in identifiers if '_' not in name and any(c.isupper() for c in name))
     
-    # Language-specific conventions
-    expected_style = {
-        'python': 'snake_case',
-        'javascript': 'camelCase',
-        'typescript': 'camelCase',
-        'java': 'camelCase',
-    }
-    
-    style = expected_style.get(language, 'snake_case')
+    # Get expected style from baseline or language defaults
+    baseline = get_baseline()
+    if baseline and baseline.get('dominant_naming_style'):
+        style = baseline['dominant_naming_style']
+    else:
+        # Language-specific conventions
+        expected_style = {
+            'python': 'snake_case',
+            'javascript': 'camelCase',
+            'typescript': 'camelCase',
+            'java': 'camelCase',
+        }
+        style = expected_style.get(language, 'snake_case')
     
     # Calculate consistency
     total_styled = snake_case_count + camel_case_count

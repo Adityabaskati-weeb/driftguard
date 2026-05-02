@@ -3,21 +3,22 @@
 Convert bob_analyzer decay metrics into a weighted health score and status labels.
 Also generates per-file rankings and aggregate statistics.
 """
-from typing import List, Dict
+from typing import List, Dict, Optional
 from datetime import datetime, timezone
 from app.config import Config
 from app.models import ScoredFile, RepoSummary, DriftReport
 
 
-def calculate_health_score(analysis: Dict) -> Dict:
+def calculate_health_score(analysis: Dict, trend_adjustment: float = 0.0) -> Dict:
     """Calculate weighted health score from 4 decay dimensions.
     
     Args:
-        analysis: dict with documentation_drift_score, test_drift_score, 
+        analysis: dict with documentation_drift_score, test_drift_score,
                   complexity_growth_score, naming_consistency_score (0-100)
+        trend_adjustment: penalty to apply based on declining trends (0-15 points)
     
     Returns:
-        Same dict with added fields: health_score, status, status_emoji
+        Same dict with added fields: health_score, status, status_emoji, trend_penalty
     """
     # Extract dimension scores, default to 50 if missing
     doc_score = analysis.get('documentation_drift_score', 50)
@@ -26,12 +27,15 @@ def calculate_health_score(analysis: Dict) -> Dict:
     naming_score = analysis.get('naming_consistency_score', 50)
     
     # Weighted average
-    health_score = int(
+    base_health_score = int(
         doc_score * Config.WEIGHT_DOCUMENTATION +
         test_score * Config.WEIGHT_TEST_COVERAGE +
         complexity_score * Config.WEIGHT_COMPLEXITY +
         naming_score * Config.WEIGHT_NAMING
     )
+    
+    # Apply trend adjustment (penalty for declining files)
+    health_score = max(0, base_health_score - int(trend_adjustment))
     
     # Determine status based on thresholds
     if health_score < Config.SCORE_CRITICAL_THRESHOLD:
@@ -49,6 +53,7 @@ def calculate_health_score(analysis: Dict) -> Dict:
     analysis['health_score'] = health_score
     analysis['status'] = status
     analysis['status_emoji'] = status_emoji
+    analysis['trend_penalty'] = trend_adjustment
     
     return analysis
 

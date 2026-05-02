@@ -1,0 +1,91 @@
+{
+  "version": "1.0",
+  "description": "Language configuration for DriftGuard file extension mapping",
+  "extensions": {
+    ".py": {
+      "language": "python",
+      "enabled": true,
+      "description": "Python source files"
+    },
+    ".js": {
+      "language": "javascript",
+      "enabled": true,
+      "description": "JavaScript source files"
+    },
+    ".ts": {
+      "language": "typescript",
+      "enabled": true,
+      "description": "TypeScript source files"
+    },
+    ".tsx": {
+      "language": "typescript",
+      "enabled": true,
+      "description": "TypeScript JSX files"
+    },
+    ".jsx": {
+      "language": "javascript",
+      "enabled": true,
+      "description": "JavaScript JSX files"
+    },
+    ".java": {
+      "language": "java",
+      "enabled": true,
+      "description": "Java source files"
+    },
+    ".go": {
+      "language": "go",
+      "enabled": true,
+      "description": "Go source files"
+    },
+    ".rb": {
+      "language": "ruby",
+      "enabled": true,
+      "description": "Ruby source files"
+    },
+    ".html": {
+      "language": "html",
+      "enabled": true,
+      "description": "HTML files"
+    },
+    ".css": {
+      "language": "css",
+      "enabled": true,
+      "description": "CSS stylesheets"
+    },
+    ".scss": {
+      "language": "css",
+      "enabled": false,
+      "description": "SCSS stylesheets"
+    },
+    ".php": {
+      "language": "php",
+      "enabled": false,
+      "description": "PHP source files"
+    },
+    ".c": {
+      "language": "c",
+      "enabled": false,
+      "description": "C source files"
+    },
+    ".cpp": {
+      "language": "cpp",
+      "enabled": false,
+      "description": "C++ source files"
+    },
+    ".rs": {
+      "language": "rust",
+      "enabled": false,
+      "description": "Rust source files"
+    },
+    ".swift": {
+      "language": "swift",
+      "enabled": false,
+      "description": "Swift source files"
+    },
+    ".kt": {
+      "language": "kotlin",
+      "enabled": false,
+      "description": "Kotlin source files"
+    }
+  }
+}

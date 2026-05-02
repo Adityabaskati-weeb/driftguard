@@ -5,14 +5,44 @@ Analyzes file diffs using heuristics (no external APIs/LLMs).
 """
 
 import re
+import logging
 from typing import List, Dict, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from app.models import FileDiff, AnalysisResult
 from app.config import Config
 from app.baseline_profile import load_baseline, format_baseline_summary
 from app.language_prompts import get_language_prompt, get_focus_areas, get_complexity_indicators
+from app.db import (
+    compute_diff_hash,
+    get_cached_analysis,
+    save_cached_analysis,
+    DEFAULT_DB_PATH
+)
+from app.rate_limiter import TokenBucketRateLimiter
+
+# Initialize logger
+logger = logging.getLogger("driftguard")
 
 # Global baseline cache
 _baseline_cache: Optional[Dict] = None
+
+# Global rate limiter instance
+_rate_limiter: Optional[TokenBucketRateLimiter] = None
+
+
+def get_rate_limiter() -> TokenBucketRateLimiter:
+    """Get or create the global rate limiter instance.
+    
+    Returns:
+        TokenBucketRateLimiter instance configured from Config
+    """
+    global _rate_limiter
+    if _rate_limiter is None:
+        _rate_limiter = TokenBucketRateLimiter(
+            tokens_per_minute=Config.BOB_RATE_LIMIT_PER_MINUTE,
+            burst_capacity=Config.BOB_RATE_LIMIT_BURST
+        )
+    return _rate_limiter
 
 
 def set_baseline(repo_path: str) -> None:
@@ -36,12 +66,15 @@ def get_baseline() -> Optional[Dict]:
     return _baseline_cache
 
 
-def analyze_file_decay(file_data: Dict) -> Dict:
+def analyze_file_decay(file_data: Dict, use_cache: bool = True,
+                       db_path: str = DEFAULT_DB_PATH) -> Dict:
     """
     Analyze a single file's decay using rule-based heuristics.
     
     Args:
         file_data: Dict with keys: file_path, diff_text, total_commits, language
+        use_cache: whether to use cache (default: True, respects Config.CACHE_ENABLED)
+        db_path: path to SQLite database file
         
     Returns:
         Dict with decay scores and analysis (AnalysisResult schema)
@@ -50,6 +83,17 @@ def analyze_file_decay(file_data: Dict) -> Dict:
     file_path = file_data.get('file_path', '')
     language = file_data.get('language', 'unknown')
     
+    # Check cache if enabled
+    if use_cache and Config.CACHE_ENABLED and diff_text:
+        diff_hash = compute_diff_hash(diff_text)
+        ttl = Config.CACHE_TTL_HOURS if Config.CACHE_TTL_HOURS > 0 else None
+        
+        cached_result = get_cached_analysis(file_path, diff_hash, ttl, db_path)
+        if cached_result:
+            # Cache hit - return cached result
+            return cached_result
+    
+    # Cache miss or cache disabled - perform analysis
     # Get baseline for context-aware scoring
     baseline = get_baseline()
     
@@ -94,48 +138,111 @@ def analyze_file_decay(file_data: Dict) -> Dict:
         'recommendation': recommendation,
     }
     
+    # Save to cache if enabled
+    if use_cache and Config.CACHE_ENABLED and diff_text:
+        diff_hash = compute_diff_hash(diff_text)
+        save_cached_analysis(file_path, diff_hash, language, result, db_path)
+    
     return result
 
 
-def batch_analyze(file_diffs: List[Dict]) -> List[Dict]:
+def _analyze_file_with_rate_limit(file_data: Dict, rate_limiter: TokenBucketRateLimiter,
+                                   index: int, total: int) -> tuple:
     """
-    Analyze multiple files with progress reporting.
+    Analyze a single file with rate limiting (thread-safe).
+    
+    Args:
+        file_data: File data dict from git_parser
+        rate_limiter: Shared rate limiter instance
+        index: File index (for logging)
+        total: Total number of files
+        
+    Returns:
+        Tuple of (index, file_path, result or None, error or None)
+    """
+    file_path = file_data.get('file_path', 'unknown')
+    
+    try:
+        # Acquire token (blocks if necessary) - thread-safe
+        rate_limiter.acquire(tokens=1)
+        
+        # Perform analysis
+        result = analyze_file_decay(file_data)
+        
+        # Calculate average score for logging
+        avg_score = (
+            result['documentation_drift_score'] +
+            result['test_drift_score'] +
+            result['complexity_growth_score'] +
+            result['naming_consistency_score']
+        ) / 4
+        
+        return (index, file_path, result, None, avg_score)
+        
+    except Exception as e:
+        logger.error(f"Analysis failed for {file_path}: {e}")
+        return (index, file_path, None, str(e), None)
+
+
+def batch_analyze(file_diffs: List[Dict], max_workers: Optional[int] = None) -> List[Dict]:
+    """
+    Analyze multiple files in parallel with progress reporting and rate limiting.
+    
+    Uses ThreadPoolExecutor to parallelize file analysis while maintaining:
+    - Thread-safe rate limiting across all workers
+    - Deterministic output order (sorted by file_path)
+    - Progress reporting
     
     Args:
         file_diffs: List of file_data dicts from git_parser
+        max_workers: Number of parallel workers (default: Config.MAX_WORKERS)
         
     Returns:
-        List of AnalysisResult dicts
+        List of AnalysisResult dicts, sorted by file_path for deterministic output
     """
-    results = []
+    if max_workers is None:
+        max_workers = Config.MAX_WORKERS
+    
     total = len(file_diffs)
     
-    print(f"\n[ANALYZER] Analyzing {total} files...")
+    # Get rate limiter instance (thread-safe)
+    rate_limiter = get_rate_limiter()
+    
+    print(f"\n[ANALYZER] Analyzing {total} files with {max_workers} parallel workers...")
+    print(f"[ANALYZER] Rate limit: {Config.BOB_RATE_LIMIT_PER_MINUTE} calls/min, burst: {Config.BOB_RATE_LIMIT_BURST}")
     print("-" * 60)
     
-    for i, file_data in enumerate(file_diffs, 1):
-        file_path = file_data.get('file_path', 'unknown')
-        print(f"[{i}/{total}] Analyzing: {file_path}")
+    # Store results with their original index for deterministic ordering
+    results_map = {}
+    completed = 0
+    
+    # Use ThreadPoolExecutor for parallel processing
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        future_to_index = {
+            executor.submit(_analyze_file_with_rate_limit, file_data, rate_limiter, i, total): i
+            for i, file_data in enumerate(file_diffs)
+        }
         
-        try:
-            result = analyze_file_decay(file_data)
-            results.append(result)
+        # Process completed tasks as they finish
+        for future in as_completed(future_to_index):
+            index, file_path, result, error, avg_score = future.result()
+            completed += 1
             
-            # Show quick score summary
-            avg_score = (
-                result['documentation_drift_score'] +
-                result['test_drift_score'] +
-                result['complexity_growth_score'] +
-                result['naming_consistency_score']
-            ) / 4
-            print(f"         Average score: {avg_score:.1f}/100")
-            
-        except Exception as e:
-            print(f"         [ERROR] Failed to analyze: {e}")
-            continue
+            if result is not None:
+                results_map[index] = result
+                print(f"[{completed}/{total}] OK {file_path} (avg: {avg_score:.1f}/100)")
+            else:
+                print(f"[{completed}/{total}] FAIL {file_path} - ERROR: {error}")
     
     print("-" * 60)
-    print(f"[ANALYZER] Completed: {len(results)}/{total} files analyzed\n")
+    
+    # Sort results by file_path for deterministic output
+    results = [results_map[i] for i in sorted(results_map.keys())]
+    results.sort(key=lambda x: x.get('file_path', ''))
+    
+    print(f"[ANALYZER] Completed: {len(results)}/{total} files analyzed")
+    print(f"[ANALYZER] Results sorted by file_path for deterministic output\n")
     
     return results
 

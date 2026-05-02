@@ -23,6 +23,15 @@ from app.report_exporter import export_report
 from app.db import initialize_db, save_run
 from app.alert_manager import AlertManager
 from app.remediation import generate_remediations_for_files
+from app.config import get_language_config_info
+from app.validation import (
+    ValidationError,
+    validate_repo_path,
+    validate_days,
+    validate_max_files,
+    validate_interval,
+    validate_export_mode
+)
 
 
 # Global flag for graceful shutdown
@@ -295,6 +304,45 @@ def watcher(repo: str, days: int, max_files: int, interval_seconds: int,
     logger.info("=" * 70)
 
 
+def print_language_config():
+    """Print active language configuration to console."""
+    print("\n" + "=" * 70)
+    print("DriftGuard Language Configuration")
+    print("=" * 70)
+    
+    try:
+        config_info = get_language_config_info()
+        
+        print(f"\nConfiguration File: {config_info['config_path']}")
+        print(f"Version: {config_info['version']}")
+        print(f"Description: {config_info['description']}")
+        
+        print(f"\n[ENABLED] Extensions ({config_info['total_enabled']}):")
+        print("-" * 70)
+        for ext_info in config_info['enabled_extensions']:
+            ext = ext_info['extension']
+            lang = ext_info['language']
+            desc = ext_info['description']
+            print(f"  {ext:8} -> {lang:15} ({desc})")
+        
+        if config_info['disabled_extensions']:
+            print(f"\n[DISABLED] Extensions ({config_info['total_disabled']}):")
+            print("-" * 70)
+            for ext_info in config_info['disabled_extensions']:
+                ext = ext_info['extension']
+                lang = ext_info['language']
+                desc = ext_info['description']
+                print(f"  {ext:8} -> {lang:15} ({desc})")
+        
+        print("\n" + "=" * 70)
+        print(f"Total: {config_info['total_enabled']} enabled, {config_info['total_disabled']} disabled")
+        print("=" * 70)
+        
+    except Exception as e:
+        print(f"[ERROR] Error loading language configuration: {e}")
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(description="DriftGuard - Codebase Decay Monitor")
     parser.add_argument("--repo", default=".", help="Path to git repository or GitHub URL (default: .)")
@@ -309,15 +357,40 @@ def main():
                         help="Export format: json, markdown, pdf, or all (default: json)")
     parser.add_argument("--remediate", action="store_true",
                         help="Generate remediation files for CRITICAL and AT_RISK files")
+    parser.add_argument("--show-languages", action="store_true",
+                        help="Show active language configuration and exit")
     
     args = parser.parse_args()
+    
+    # Handle --show-languages flag
+    if args.show_languages:
+        print_language_config()
+        sys.exit(0)
+    
+    # Validate inputs
+    try:
+        validate_days(args.days)
+        validate_max_files(args.max_files)
+        validate_export_mode(args.export)
+        validate_repo_path(args.repo, args.github_token)
+    except ValidationError as e:
+        print(f"ERROR: {e.message}", file=sys.stderr)
+        if e.hint:
+            print(f"HINT: {e.hint}", file=sys.stderr)
+        sys.exit(1)
     
     # Watch mode
     if args.watch:
         try:
+            validate_interval(args.interval)
             interval_seconds = parse_interval(args.interval)
+        except ValidationError as e:
+            print(f"ERROR: {e.message}", file=sys.stderr)
+            if e.hint:
+                print(f"HINT: {e.hint}", file=sys.stderr)
+            sys.exit(1)
         except ValueError as e:
-            print(f"❌ {e}")
+            print(f"ERROR: {e}", file=sys.stderr)
             sys.exit(1)
         
         # Run watcher

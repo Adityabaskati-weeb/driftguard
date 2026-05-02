@@ -10,7 +10,7 @@ import tempfile
 import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List, Dict, Optional, Any, Tuple
+from typing import List, Dict, Optional, Any, Tuple, Set
 from collections import defaultdict
 
 try:
@@ -23,21 +23,26 @@ try:
 except ImportError:
     raise ImportError("requests is required. Install with: pip install requests")
 
+# Import config functions for language mapping
+from app.config import get_supported_extensions, get_extension_to_language_map
 
-# Supported file extensions
-SUPPORTED_EXTENSIONS = {'.py', '.js', '.ts', '.java', '.go', '.rb', '.html', '.css'}
 
-# Language mapping
-EXTENSION_TO_LANGUAGE = {
-    '.py': 'python',
-    '.js': 'javascript',
-    '.ts': 'typescript',
-    '.java': 'java',
-    '.go': 'go',
-    '.rb': 'ruby',
-    '.html': 'html',
-    '.css': 'css',
-}
+def _get_supported_extensions() -> Set[str]:
+    """Get supported file extensions from config.
+    
+    Returns:
+        Set of supported file extensions
+    """
+    return get_supported_extensions()
+
+
+def _get_extension_to_language() -> Dict[str, str]:
+    """Get extension to language mapping from config.
+    
+    Returns:
+        Dictionary mapping extensions to language names
+    """
+    return get_extension_to_language_map()
 
 # Maximum lines for diff_text
 MAX_DIFF_LINES = 150
@@ -184,7 +189,7 @@ def _convert_github_diff_to_format(files_data: List[Dict], commit_sha: str,
         
         # Filter by extension
         ext = Path(filename).suffix.lower()
-        if ext not in SUPPORTED_EXTENSIONS:
+        if ext not in _get_supported_extensions():
             continue
         
         # Skip large files
@@ -289,9 +294,10 @@ def _fetch_github_repo_diffs(owner: str, repo: str, days: int,
     
     # Build result list (same format as get_file_diffs)
     results = []
+    extension_map = _get_extension_to_language()
     for file_path, data in file_data.items():
         ext = Path(file_path).suffix.lower()
-        language = EXTENSION_TO_LANGUAGE.get(ext, 'unknown')
+        language = extension_map.get(ext, 'unknown')
         
         # Concatenate all diffs
         full_diff = '\n\n'.join(data['diffs'])
@@ -466,7 +472,7 @@ def get_file_diffs(repo_path: str, days: int) -> List[Dict]:
             
             # Filter by extension
             ext = Path(file_path).suffix.lower()
-            if ext not in SUPPORTED_EXTENSIONS:
+            if ext not in _get_supported_extensions():
                 continue
             
             # Skip binary files (with error handling for missing blobs)
@@ -505,10 +511,11 @@ def get_file_diffs(repo_path: str, days: int) -> List[Dict]:
     
     # Build result list
     results = []
+    extension_map = _get_extension_to_language()
     for file_path, data in file_data.items():
         # Get language from extension
         ext = Path(file_path).suffix.lower()
-        language = EXTENSION_TO_LANGUAGE.get(ext, 'unknown')
+        language = extension_map.get(ext, 'unknown')
         
         # Concatenate all diffs
         full_diff = '\n\n'.join(data['diffs'])

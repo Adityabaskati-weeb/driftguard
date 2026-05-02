@@ -5,7 +5,7 @@ Load and manage application configuration from environment, CLI, and defaults.
 import os
 import json
 from pathlib import Path
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Set, Tuple
 from dotenv import load_dotenv
 
 # Load .env file if it exists
@@ -121,6 +121,174 @@ class Config:
     RULE_DOC_DRIFT_THRESHOLD_ADDED_LINES = 50      # if 50+ lines added with 0 comments
     RULE_COMPLEXITY_NESTING_THRESHOLD = 2          # nesting level increase
     RULE_TEST_REQUIRED_RATIO = 0.3                 # if changed code vs test code ratio
+    
+    # Analysis cache settings
+    CACHE_ENABLED = os.getenv("DRIFTGUARD_CACHE_ENABLED", "true").lower() == "true"
+    CACHE_TTL_HOURS = int(os.getenv("DRIFTGUARD_CACHE_TTL_HOURS", "0"))  # 0 = no expiry
+    
+    # Rate limiting settings for Bob analysis calls
+    BOB_RATE_LIMIT_PER_MINUTE = int(os.getenv("BOB_RATE_LIMIT_PER_MINUTE", "30"))  # Max calls per minute
+    BOB_RATE_LIMIT_BURST = int(os.getenv("BOB_RATE_LIMIT_BURST", "5"))  # Burst capacity
+    
+    # Parallel processing settings
+    # Language configuration file path
+    LANGUAGE_CONFIG_PATH = Path(os.getenv(
+        "DRIFTGUARD_LANGUAGE_CONFIG",
+        str(DATA_DIR / "language_config.json")
+    ))
+    
+    # Cached language configuration
+    _language_config_cache: Optional[Dict] = None
+    _supported_extensions_cache: Optional[Set[str]] = None
+    _extension_to_language_cache: Optional[Dict[str, str]] = None
+
+
+def load_language_config(force_reload: bool = False) -> Dict:
+    """Load language configuration from JSON file.
+    
+    Args:
+        force_reload: Force reload from disk even if cached
+        
+    Returns:
+        Dictionary containing language configuration
+    """
+    if not force_reload and Config._language_config_cache is not None:
+        return Config._language_config_cache
+    
+    config_path = Config.LANGUAGE_CONFIG_PATH
+    
+    # Default configuration if file doesn't exist
+    default_config = {
+        "version": "1.0",
+        "description": "Default language configuration",
+        "extensions": {
+            ".py": {"language": "python", "enabled": True, "description": "Python source files"},
+            ".js": {"language": "javascript", "enabled": True, "description": "JavaScript source files"},
+            ".ts": {"language": "typescript", "enabled": True, "description": "TypeScript source files"},
+            ".java": {"language": "java", "enabled": True, "description": "Java source files"},
+            ".go": {"language": "go", "enabled": True, "description": "Go source files"},
+            ".rb": {"language": "ruby", "enabled": True, "description": "Ruby source files"},
+            ".html": {"language": "html", "enabled": True, "description": "HTML files"},
+            ".css": {"language": "css", "enabled": True, "description": "CSS stylesheets"},
+        }
+    }
+    
+    if not config_path.exists():
+        print(f"Warning: Language config not found at {config_path}, using defaults")
+        Config._language_config_cache = default_config
+        return default_config
+    
+    try:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+            Config._language_config_cache = config
+            return config
+    except (json.JSONDecodeError, IOError) as e:
+        print(f"Warning: Failed to load language config from {config_path}: {e}")
+        print("Using default configuration")
+        Config._language_config_cache = default_config
+        return default_config
+
+
+def get_supported_extensions() -> Set[str]:
+    """Get set of enabled file extensions.
+    
+    Returns:
+        Set of file extensions (e.g., {'.py', '.js', '.ts'})
+    """
+    if Config._supported_extensions_cache is not None:
+        return Config._supported_extensions_cache
+    
+    config = load_language_config()
+    extensions = config.get("extensions", {})
+    
+    supported = {
+        ext for ext, info in extensions.items()
+        if info.get("enabled", True)
+    }
+    
+    Config._supported_extensions_cache = supported
+    return supported
+
+
+def get_extension_to_language_map() -> Dict[str, str]:
+    """Get mapping of file extensions to language names.
+    
+    Returns:
+        Dictionary mapping extensions to language names (e.g., {'.py': 'python'})
+    """
+    if Config._extension_to_language_cache is not None:
+        return Config._extension_to_language_cache
+    
+    config = load_language_config()
+    extensions = config.get("extensions", {})
+    
+    mapping = {
+        ext: info.get("language", "unknown")
+        for ext, info in extensions.items()
+        if info.get("enabled", True)
+    }
+    
+    Config._extension_to_language_cache = mapping
+    return mapping
+
+
+def get_language_config_info() -> Dict:
+    """Get full language configuration information for display.
+    
+    Returns:
+        Dictionary with configuration details including enabled/disabled extensions
+    """
+    config = load_language_config()
+    extensions = config.get("extensions", {})
+    
+    enabled = []
+    disabled = []
+    
+    for ext, info in sorted(extensions.items()):
+        entry = {
+            "extension": ext,
+            "language": info.get("language", "unknown"),
+            "description": info.get("description", "")
+        }
+        
+        if info.get("enabled", True):
+            enabled.append(entry)
+        else:
+            disabled.append(entry)
+    
+    return {
+        "version": config.get("version", "unknown"),
+        "description": config.get("description", ""),
+        "config_path": str(Config.LANGUAGE_CONFIG_PATH),
+        "enabled_extensions": enabled,
+        "disabled_extensions": disabled,
+        "total_enabled": len(enabled),
+        "total_disabled": len(disabled)
+    }
+
+
+def reload_language_config() -> Tuple[bool, str]:
+    """Reload language configuration from disk.
+    
+    Returns:
+        Tuple of (success, message)
+    """
+    try:
+        # Clear caches
+        Config._language_config_cache = None
+        Config._supported_extensions_cache = None
+        Config._extension_to_language_cache = None
+        
+        # Reload
+        config = load_language_config(force_reload=True)
+        enabled_count = len(get_supported_extensions())
+        
+        return True, f"Language configuration reloaded successfully. {enabled_count} extensions enabled."
+    except Exception as e:
+        return False, f"Failed to reload language configuration: {str(e)}"
+
+    MAX_WORKERS = int(os.getenv("DRIFTGUARD_MAX_WORKERS", str(min(8, os.cpu_count() or 1))))  # Parallel analysis workers
 
 
 def get_output_report_path(timestamp: Optional[str] = None) -> Path:

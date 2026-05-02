@@ -4,9 +4,10 @@ SQLite persistence layer for DriftGuard reports and file trends.
 """
 import sqlite3
 import json
+import hashlib
 from pathlib import Path
 from typing import List, Dict, Optional
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 
 DEFAULT_DB_PATH = "data/driftguard.db"
@@ -57,8 +58,32 @@ def initialize_db(db_path: str = DEFAULT_DB_PATH) -> None:
     
     # Create index for faster trend queries
     cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_file_scores_file_path 
+        CREATE INDEX IF NOT EXISTS idx_file_scores_file_path
         ON file_scores(file_path)
+    """)
+    
+    # Create analysis_cache table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS analysis_cache (
+            cache_key TEXT PRIMARY KEY,
+            file_path TEXT NOT NULL,
+            diff_hash TEXT NOT NULL,
+            language TEXT,
+            analysis_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    
+    # Create index for cache lookups by file_path
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_cache_file_path
+        ON analysis_cache(file_path)
+    """)
+    
+    # Create index for cache expiry queries
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_cache_created_at
+        ON analysis_cache(created_at)
     """)
     
     conn.commit()
@@ -241,5 +266,183 @@ def get_all_runs(db_path: str = DEFAULT_DB_PATH) -> List[Dict]:
         })
     
     return runs
+
+
+# ============================================================================
+# ANALYSIS CACHE FUNCTIONS
+# ============================================================================
+
+def compute_cache_key(file_path: str, diff_hash: str) -> str:
+    """Compute cache key from file path and diff hash.
+    
+    Args:
+        file_path: relative path to the file
+        diff_hash: hash of the diff content
+    
+    Returns:
+        SHA256 hash as hex string
+    """
+    key_input = f"{file_path}:{diff_hash}"
+    return hashlib.sha256(key_input.encode('utf-8')).hexdigest()
+
+
+def compute_diff_hash(diff_text: str) -> str:
+    """Compute SHA256 hash of diff text.
+    
+    Args:
+        diff_text: the diff content to hash
+    
+    Returns:
+        SHA256 hash as hex string
+    """
+    return hashlib.sha256(diff_text.encode('utf-8')).hexdigest()
+
+
+def get_cached_analysis(file_path: str, diff_hash: str,
+                       ttl_hours: Optional[int] = None,
+                       db_path: str = DEFAULT_DB_PATH) -> Optional[Dict]:
+    """Retrieve cached analysis result if available and not expired.
+    
+    Args:
+        file_path: relative path to the file
+        diff_hash: hash of the diff content
+        ttl_hours: time-to-live in hours (None = no expiry)
+        db_path: path to SQLite database file
+    
+    Returns:
+        Cached analysis dict or None if not found/expired
+    """
+    cache_key = compute_cache_key(file_path, diff_hash)
+    
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        SELECT analysis_json, created_at
+        FROM analysis_cache
+        WHERE cache_key = ?
+    """, (cache_key,))
+    
+    row = cursor.fetchone()
+    conn.close()
+    
+    if not row:
+        return None
+    
+    # Check TTL if specified
+    if ttl_hours is not None:
+        created_at = datetime.fromisoformat(row['created_at'])
+        now = datetime.now(timezone.utc)
+        age_hours = (now - created_at).total_seconds() / 3600
+        
+        if age_hours > ttl_hours:
+            # Cache expired
+            return None
+    
+    # Return cached analysis
+    return json.loads(row['analysis_json'])
+
+
+def save_cached_analysis(file_path: str, diff_hash: str, language: str,
+                        analysis_result: Dict,
+                        db_path: str = DEFAULT_DB_PATH) -> None:
+    """Save analysis result to cache.
+    
+    Args:
+        file_path: relative path to the file
+        diff_hash: hash of the diff content
+        language: programming language
+        analysis_result: the analysis result dict to cache
+        db_path: path to SQLite database file
+    """
+    cache_key = compute_cache_key(file_path, diff_hash)
+    analysis_json = json.dumps(analysis_result)
+    created_at = datetime.now(timezone.utc).isoformat()
+    
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    # Use INSERT OR REPLACE to handle duplicates
+    cursor.execute("""
+        INSERT OR REPLACE INTO analysis_cache
+        (cache_key, file_path, diff_hash, language, analysis_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (cache_key, file_path, diff_hash, language, analysis_json, created_at))
+    
+    conn.commit()
+    conn.close()
+
+
+def clear_expired_cache(ttl_hours: int, db_path: str = DEFAULT_DB_PATH) -> int:
+    """Remove expired cache entries.
+    
+    Args:
+        ttl_hours: time-to-live in hours
+        db_path: path to SQLite database file
+    
+    Returns:
+        Number of entries deleted
+    """
+    cutoff_time = datetime.now(timezone.utc) - timedelta(hours=ttl_hours)
+    cutoff_iso = cutoff_time.isoformat()
+    
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        DELETE FROM analysis_cache
+        WHERE created_at < ?
+    """, (cutoff_iso,))
+    
+    deleted_count = cursor.rowcount
+    conn.commit()
+    conn.close()
+    
+    return deleted_count
+
+
+def get_cache_stats(db_path: str = DEFAULT_DB_PATH) -> Dict:
+    """Get cache statistics.
+    
+    Args:
+        db_path: path to SQLite database file
+    
+    Returns:
+        Dict with cache statistics
+    """
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    # Total entries
+    cursor.execute("SELECT COUNT(*) FROM analysis_cache")
+    total_entries = cursor.fetchone()[0]
+    
+    # Entries by language
+    cursor.execute("""
+        SELECT language, COUNT(*) as count
+        FROM analysis_cache
+        GROUP BY language
+        ORDER BY count DESC
+    """)
+    by_language = {row[0]: row[1] for row in cursor.fetchall()}
+    
+    # Oldest and newest entries
+    cursor.execute("""
+        SELECT MIN(created_at) as oldest, MAX(created_at) as newest
+        FROM analysis_cache
+    """)
+    row = cursor.fetchone()
+    oldest = row[0] if row[0] else None
+    newest = row[1] if row[1] else None
+    
+    conn.close()
+    
+    return {
+        'total_entries': total_entries,
+        'by_language': by_language,
+        'oldest_entry': oldest,
+        'newest_entry': newest
+    }
 
 # Made with Bob

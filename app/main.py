@@ -9,14 +9,18 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request, Query, Header, Depends
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.templating import Jinja2Templates
 
-from app.config import Config, get_latest_report, load_repos_config
+from app.config import (
+    Config, get_latest_report, load_repos_config,
+    get_language_config_info, reload_language_config
+)
 from app.report_generator import load_report
 from app import db
+from app.validation import ValidationError, validate_file_path, validate_days, validate_max_files
 
 
 # Initialize FastAPI app
@@ -37,6 +41,16 @@ app.add_middleware(
 
 # Setup Jinja2 templates
 templates = Jinja2Templates(directory=str(Config.TEMPLATES_DIR))
+
+
+# Custom exception handler for ValidationError
+@app.exception_handler(ValidationError)
+async def validation_exception_handler(request: Request, exc: ValidationError):
+    """Handle ValidationError exceptions with structured JSON response."""
+    return JSONResponse(
+        status_code=400,
+        content=exc.to_dict()
+    )
 
 
 def verify_api_key(x_driftguard_key: Optional[str] = Header(None, alias="X-DriftGuard-Key")):
@@ -207,9 +221,13 @@ async def get_report(api_key: str = Depends(verify_api_key)):
     report = get_report_data()
     
     if report is None:
-        raise HTTPException(
+        return JSONResponse(
             status_code=404,
-            detail="No report found. Run 'python driftguard.py --repo . --days 30' first."
+            content={
+                "error": "No report found",
+                "hint": "Run 'python driftguard.py --repo . --days 30' to generate a report first.",
+                "code": "NO_REPORT_FOUND"
+            }
         )
     
     # Enhance report with sparkline data for each file
@@ -240,10 +258,24 @@ async def get_report_by_filename(filename: str, api_key: str = Depends(verify_ap
     report_path = Config.OUTPUT_DIR / filename
     
     if not report_path.exists():
-        raise HTTPException(status_code=404, detail=f"Report {filename} not found")
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": f"Report not found: {filename}",
+                "hint": f"Check available reports in the output directory. Run 'python driftguard.py' to generate a report.",
+                "code": "REPORT_NOT_FOUND"
+            }
+        )
     
     if not str(report_path).endswith('.json'):
-        raise HTTPException(status_code=400, detail="Only JSON reports are supported")
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "Invalid report format",
+                "hint": "Only JSON reports are supported. Use .json extension.",
+                "code": "INVALID_REPORT_FORMAT"
+            }
+        )
     
     return load_report(str(report_path))
 
@@ -261,12 +293,25 @@ async def get_file_trends(file: str = Query(..., description="File path to get t
     Returns:
         List of trend data points with run_id, timestamp, health_score, and dimension scores
     """
+    # Validate file path
+    try:
+        validate_file_path(file)
+    except ValidationError as e:
+        return JSONResponse(
+            status_code=400,
+            content=e.to_dict()
+        )
+    
     trends = db.get_file_trends(file)
     
     if not trends:
-        raise HTTPException(
+        return JSONResponse(
             status_code=404,
-            detail=f"No trend data found for file: {file}"
+            content={
+                "error": f"No trend data found for file: {file}",
+                "hint": "Ensure the file has been analyzed in at least one run. Check the file path is correct.",
+                "code": "FILE_NOT_FOUND"
+            }
         )
     
     return {
@@ -293,9 +338,13 @@ async def get_remediation(file_name: str, api_key: str = Depends(verify_api_key)
     remediation_path = Path("remediation") / file_name
     
     if not remediation_path.exists():
-        raise HTTPException(
+        return JSONResponse(
             status_code=404,
-            detail=f"Remediation file not found: {file_name}. Run with --remediate flag first."
+            content={
+                "error": f"Remediation file not found: {file_name}",
+                "hint": "Run 'python driftguard.py --remediate' to generate remediation files for CRITICAL and AT_RISK files.",
+                "code": "REMEDIATION_NOT_FOUND"
+            }
         )
     
     try:
@@ -307,11 +356,60 @@ async def get_remediation(file_name: str, api_key: str = Depends(verify_api_key)
             "content": content
         }
     except Exception as e:
-        raise HTTPException(
+        return JSONResponse(
             status_code=500,
-            detail=f"Error reading remediation file: {str(e)}"
+            content={
+                "error": f"Error reading remediation file: {str(e)}",
+                "hint": "Check file permissions and ensure the remediation directory is accessible.",
+                "code": "REMEDIATION_READ_ERROR"
+            }
         )
 
+
+
+@app.get("/api/language-config", tags=["API"])
+async def get_language_config():
+    """Get active language configuration (no API key required).
+    
+    Returns information about enabled and disabled file extensions,
+    their language mappings, and configuration file path.
+    """
+    try:
+        config_info = get_language_config_info()
+        return config_info
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": f"Failed to load language configuration: {str(e)}",
+                "hint": "Check that language_config.json exists and is valid JSON.",
+                "code": "LANGUAGE_CONFIG_ERROR"
+            }
+        )
+
+
+@app.post("/api/language-config/reload", tags=["API"])
+async def reload_language_config_endpoint(api_key: str = Depends(verify_api_key)):
+    """Reload language configuration from disk (requires API key).
+    
+    Useful after manually editing the language_config.json file.
+    Clears all caches and reloads the configuration.
+    """
+    success, message = reload_language_config()
+    
+    if success:
+        return {
+            "status": "success",
+            "message": message
+        }
+    else:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": message,
+                "code": "RELOAD_FAILED"
+            }
+        )
 
 
 @app.on_event("startup")

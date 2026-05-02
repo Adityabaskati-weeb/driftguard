@@ -1,106 +1,237 @@
-"""git_parser.py
+"""Git parser module for DriftGuard.
 
-Extract recent file diffs from a git repository using GitPython.
-Provides get_file_diffs(repo_path: str, days: int) -> list[dict]
+Extracts file diffs from a Git repository over a specified time window.
 """
-from datetime import datetime, timedelta, timezone
+
 import os
-from typing import List, Dict
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import List, Dict, Optional, Any
+from collections import defaultdict
 
-from git import Repo, NULL_TREE
-
-
-ALLOWED_EXT = {'.py': 'python', '.js': 'javascript', '.ts': 'typescript', '.java': 'java'}
-
-
-def _infer_language(path: str) -> str:
-    _, ext = os.path.splitext(path.lower())
-    return ALLOWED_EXT.get(ext, 'other')
+try:
+    from git import Repo, GitCommandError, InvalidGitRepositoryError
+except ImportError:
+    raise ImportError("GitPython is required. Install with: pip install gitpython")
 
 
-def _truncate_diff(diff_text: str, max_lines: int = 150) -> str:
-    lines = diff_text.splitlines()
-    if len(lines) <= max_lines:
-        return '\n'.join(lines)
-    head = lines[:75]
-    tail = lines[-75:]
-    return '\n'.join(head + ['... [truncated] ...'] + tail)
+# Supported file extensions
+SUPPORTED_EXTENSIONS = {'.py', '.js', '.ts', '.java'}
+
+# Language mapping
+EXTENSION_TO_LANGUAGE = {
+    '.py': 'python',
+    '.js': 'javascript',
+    '.ts': 'typescript',
+    '.java': 'java',
+}
+
+# Maximum lines for diff_text
+MAX_DIFF_LINES = 150
+TRUNCATE_HEAD_LINES = 75
+TRUNCATE_TAIL_LINES = 75
 
 
 def get_file_diffs(repo_path: str, days: int) -> List[Dict]:
-    repo = Repo(repo_path)
-    since_dt = datetime.now(timezone.utc) - timedelta(days=days)
-    since_iso = since_dt.isoformat()
-
-    file_map = {}  # path -> {'commits': set(), 'diffs': [str], 'last_modified': datetime}
-
+    """
+    Extract file diffs from a Git repository over the last N days.
+    
+    Args:
+        repo_path: Path to the git repository (absolute or relative)
+        days: Number of days to look back in history
+        
+    Returns:
+        List of dictionaries, each containing:
+        - file_path: Relative path to the file
+        - language: Programming language (inferred from extension)
+        - total_commits: Number of commits that modified this file
+        - diff_text: Concatenated unified diff (max 150 lines)
+        - last_modified: ISO timestamp of most recent commit
+        - commit_hashes: List of commit hashes that touched this file
+        
+    Returns empty list if no files were modified in the time window.
+    
+    Raises:
+        InvalidGitRepositoryError: If repo_path is not a valid git repository
+        GitCommandError: If git operations fail
+    """
+    # Resolve repository path
+    repo_path = os.path.abspath(repo_path)
+    
     try:
-        commits = list(repo.iter_commits(since=since_iso))
-    except TypeError:
-        # Some GitPython versions expect since as a string; fall back to iterating recent commits
-        commits = list(repo.iter_commits())
-
+        repo = Repo(repo_path)
+    except InvalidGitRepositoryError:
+        raise InvalidGitRepositoryError(f"Not a valid git repository: {repo_path}")
+    
+    # Calculate cutoff date
+    cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
+    
+    # Collect file changes grouped by file path
+    file_data: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
+        'commits': [],
+        'diffs': [],
+        'last_modified': None,
+    })
+    
+    # Iterate through commits in the time window
+    try:
+        commits = list(repo.iter_commits('HEAD', since=cutoff_date))
+    except GitCommandError as e:
+        # Handle empty repository or other git errors
+        print(f"Warning: Git command error: {e}")
+        return []
+    
+    if not commits:
+        return []
+    
     for commit in commits:
-        commit_dt = commit.committed_datetime
-        parent = commit.parents[0] if commit.parents else NULL_TREE
-        try:
-            diffs = commit.diff(parent, create_patch=True)
-        except Exception:
-            continue
-
-        for diff in diffs:
-            path = diff.b_path or diff.a_path
-            if not path:
-                continue
-            _, ext = os.path.splitext(path.lower())
-            if ext not in ALLOWED_EXT:
-                continue
-            # try to get unified diff text
+        commit_date = datetime.fromtimestamp(commit.committed_date, tz=timezone.utc)
+        
+        # Get parent commit for diff (handle initial commit case)
+        if commit.parents:
+            parent = commit.parents[0]
             try:
-                raw = diff.diff
-                if raw is None:
-                    # binary or non-text
-                    continue
-                diff_text = raw.decode('utf-8', errors='replace')
-            except Exception:
+                diffs = parent.diff(commit, create_patch=True)
+            except GitCommandError:
                 continue
-
-            entry = file_map.setdefault(path, {'commits': set(), 'diffs': [], 'last_modified': None})
-            entry['commits'].add(commit.hexsha)
-            entry['diffs'].append(diff_text)
-            if entry['last_modified'] is None or commit_dt > entry['last_modified']:
-                entry['last_modified'] = commit_dt
-
+        else:
+            # Initial commit - compare against empty tree
+            try:
+                diffs = commit.diff(None, create_patch=True)
+            except GitCommandError:
+                continue
+        
+        # Process each changed file
+        for diff in diffs:
+            # Get file path (handle renames)
+            if diff.b_path:
+                file_path = diff.b_path
+            elif diff.a_path:
+                file_path = diff.a_path
+            else:
+                continue
+            
+            # Filter by extension
+            ext = Path(file_path).suffix.lower()
+            if ext not in SUPPORTED_EXTENSIONS:
+                continue
+            
+            # Skip binary files (with error handling for missing blobs)
+            try:
+                if diff.b_blob and diff.b_blob.size > 1024 * 1024:  # Skip files > 1MB
+                    continue
+            except (ValueError, AttributeError):
+                # Blob might be missing or corrupted, skip it
+                continue
+            
+            try:
+                # Get diff text
+                if diff.diff:
+                    if isinstance(diff.diff, bytes):
+                        diff_text = diff.diff.decode('utf-8', errors='ignore')
+                    else:
+                        diff_text = str(diff.diff)
+                else:
+                    diff_text = ""
+            except (AttributeError, UnicodeDecodeError, ValueError):
+                # Skip if we can't decode the diff or blob is missing
+                continue
+            
+            # Skip if diff is empty or binary
+            if not diff_text or diff_text.startswith('Binary files'):
+                continue
+            
+            # Store file data
+            file_data[file_path]['commits'].append(commit.hexsha)
+            file_data[file_path]['diffs'].append(diff_text)
+            
+            # Update last modified timestamp
+            if (file_data[file_path]['last_modified'] is None or 
+                commit_date > file_data[file_path]['last_modified']):
+                file_data[file_path]['last_modified'] = commit_date
+    
+    # Build result list
     results = []
-    for path, data in file_map.items():
-        language = _infer_language(path)
-        total_commits = len(data['commits'])
-        combined = '\n'.join(data['diffs'])
-        truncated = _truncate_diff(combined, max_lines=150)
-        last_mod_iso = data['last_modified'].astimezone(timezone.utc).isoformat() if data['last_modified'] else None
-        results.append({
-            'file_path': path,
+    for file_path, data in file_data.items():
+        # Get language from extension
+        ext = Path(file_path).suffix.lower()
+        language = EXTENSION_TO_LANGUAGE.get(ext, 'unknown')
+        
+        # Concatenate all diffs
+        full_diff = '\n\n'.join(data['diffs'])
+        
+        # Truncate if necessary
+        diff_lines = full_diff.split('\n')
+        if len(diff_lines) > MAX_DIFF_LINES:
+            truncated_diff = (
+                '\n'.join(diff_lines[:TRUNCATE_HEAD_LINES]) +
+                '\n\n... [truncated] ...\n\n' +
+                '\n'.join(diff_lines[-TRUNCATE_TAIL_LINES:])
+            )
+        else:
+            truncated_diff = full_diff
+        
+        # Build result dict
+        result = {
+            'file_path': file_path,
             'language': language,
-            'total_commits': total_commits,
-            'diff_text': truncated,
-            'last_modified': last_mod_iso,
-            'commit_hashes': list(data['commits']),
-        })
-
-    # sort by total_commits descending
-    results.sort(key=lambda r: r['total_commits'], reverse=True)
+            'total_commits': len(data['commits']),
+            'diff_text': truncated_diff,
+            'last_modified': data['last_modified'].isoformat() if data['last_modified'] else None,
+            'commit_hashes': data['commits'],
+        }
+        results.append(result)
+    
+    # Sort by last_modified (most recent first)
+    results.sort(key=lambda x: x['last_modified'] or '', reverse=True)
+    
     return results
 
 
 def test_git_parser():
-    print('Running test_git_parser on current directory...')
-    res = get_file_diffs('.', 7)
-    if not res:
-        print('No file diffs found in the last 7 days.')
-        return
-    from pprint import pprint
-    pprint(res[0])
+    """
+    Test function that runs git_parser on the current directory.
+    Prints the first result for verification.
+    """
+    print("[TEST] Testing git_parser on current directory...")
+    print(f"Current directory: {os.getcwd()}")
+    print("-" * 60)
+    
+    try:
+        # Run parser on current directory, last 30 days
+        results = get_file_diffs('.', days=30)
+        
+        print(f"[OK] Found {len(results)} files modified in the last 30 days")
+        print("-" * 60)
+        
+        if results:
+            print("\n[RESULT] First result:")
+            first = results[0]
+            print(f"  File: {first['file_path']}")
+            print(f"  Language: {first['language']}")
+            print(f"  Total commits: {first['total_commits']}")
+            print(f"  Last modified: {first['last_modified']}")
+            print(f"  Commit hashes: {', '.join(first['commit_hashes'][:3])}{'...' if len(first['commit_hashes']) > 3 else ''}")
+            print(f"  Diff length: {len(first['diff_text'])} characters")
+            print(f"  Diff lines: {len(first['diff_text'].split(chr(10)))} lines")
+            print("\n  First 10 lines of diff:")
+            diff_lines = first['diff_text'].split('\n')[:10]
+            for line in diff_lines:
+                print(f"    {line}")
+        else:
+            print("[WARN] No files found in the time window")
+            print("   Try increasing --days or check if this is a git repository")
+        
+    except InvalidGitRepositoryError as e:
+        print(f"[ERROR] {e}")
+        print("   Make sure you're running this in a git repository")
+    except Exception as e:
+        print(f"[ERROR] Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == '__main__':
     test_git_parser()
+
+# Made with Bob

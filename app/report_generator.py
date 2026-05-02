@@ -10,6 +10,11 @@ from typing import List, Dict
 from app.config import Config, get_output_report_path
 from app.models import DriftReport
 from app.scorer import generate_summary
+from app import db
+
+
+# Initialize database on module import
+db.initialize_db()
 
 
 def generate_report(
@@ -29,10 +34,13 @@ def generate_report(
     """
     summary = generate_summary(scored_files)
     
+    # Generate timestamp with microseconds for uniqueness
+    timestamp = datetime.now(timezone.utc).isoformat(timespec='microseconds')
+    
     report: DriftReport = {
         'repo': str(repo_path),
         'analysis_window_days': days,
-        'analyzed_at': datetime.now(timezone.utc).isoformat(),
+        'analyzed_at': timestamp,
         'files': scored_files,
         'summary': summary,
     }
@@ -41,7 +49,7 @@ def generate_report(
 
 
 def save_report(report: DriftReport, output_path: str = None) -> Path:
-    """Save DriftReport to JSON file.
+    """Save DriftReport to JSON file and database.
     
     Args:
         report: DriftReport dict from generate_report()
@@ -58,8 +66,12 @@ def save_report(report: DriftReport, output_path: str = None) -> Path:
     # Create parent directory if needed
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
+    # Save to JSON file
     with open(output_path, 'w') as f:
         json.dump(report, f, indent=2)
+    
+    # Save to database
+    db.save_run(report)
     
     return output_path
 

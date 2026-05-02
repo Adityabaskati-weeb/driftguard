@@ -1,0 +1,45 @@
+# DriftGuard Docker Compose Configuration
+# 
+# Usage:
+#   docker-compose up -d          # Start in background
+#   docker-compose logs -f        # View logs
+#   docker-compose down           # Stop and remove containers
+
+version: '3.8'
+
+services:
+  driftguard-watcher:
+    build: .
+    container_name: driftguard-watcher
+    restart: unless-stopped
+    
+    # Environment variables (override in .env file)
+    environment:
+      - REPO_PATH=${REPO_PATH:-/repo}
+      - WATCH_INTERVAL=${WATCH_INTERVAL:-24h}
+      - DRIFTGUARD_DAYS=${DRIFTGUARD_DAYS:-30}
+      - DRIFTGUARD_MAX_FILES=${DRIFTGUARD_MAX_FILES:-20}
+    
+    # Volume mappings
+    volumes:
+      # Mount the repository to analyze (read-only recommended)
+      - ${HOST_REPO_PATH:-./repo}:/repo:ro
+      
+      # Persist database and logs
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./output:/app/output
+    
+    # Load environment variables from .env file
+    env_file:
+      - .env
+    
+    # Health check (optional)
+    healthcheck:
+      test: ["CMD", "test", "-f", "/app/logs/driftguard.log"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+# Made with Bob

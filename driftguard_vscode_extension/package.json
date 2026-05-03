@@ -1,0 +1,57 @@
+{
+  "name": "driftguard",
+  "displayName": "DriftGuard",
+  "description": "Inline codebase decay warnings from DriftGuard analysis",
+  "version": "0.1.0",
+  "publisher": "driftguard",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Linters",
+    "Other"
+  ],
+  "activationEvents": [
+    "workspaceContains:.git"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "driftguard.refresh",
+        "title": "DriftGuard: Refresh Analysis"
+      },
+      {
+        "command": "driftguard.openReport",
+        "title": "DriftGuard: Open Latest Report"
+      }
+    ],
+    "configuration": {
+      "title": "DriftGuard",
+      "properties": {
+        "driftguard.reportPath": {
+          "type": "string",
+          "default": "output",
+          "description": "Path to DriftGuard output directory (relative to workspace root)"
+        },
+        "driftguard.autoRefresh": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically refresh when new reports are detected"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.0.0",
+    "vscode-test": "^1.6.1"
+  }
+}

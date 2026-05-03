@@ -109,12 +109,12 @@ class Config:
     WEIGHT_COMPLEXITY = 0.25
     WEIGHT_NAMING = 0.15
     
-    # Status emojis
+    # Status indicators (ASCII-safe for Windows)
     STATUS_EMOJI = {
-        "CRITICAL": "🔴",
-        "AT_RISK": "🟠",
-        "WATCH": "🟡",
-        "HEALTHY": "🟢",
+        "CRITICAL": "[CRIT]",
+        "AT_RISK": "[RISK]",
+        "WATCH": "[WATCH]",
+        "HEALTHY": "[OK]",
     }
     
     # Rule-based analyzer thresholds

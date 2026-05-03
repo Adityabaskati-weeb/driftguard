@@ -328,10 +328,10 @@ def generate_remediations_for_files(scored_files: list, repo_path: str, db_conn:
     ]
     
     if not problematic_files:
-        print("\n✅ No CRITICAL or AT_RISK files found. No remediation needed.")
+        print("\n[+] No CRITICAL or AT_RISK files found. No remediation needed.")
         return 0
     
-    print(f"\n🔧 Generating remediation for {len(problematic_files)} files...")
+    print(f"\n[*] Generating remediation for {len(problematic_files)} files...")
     print("-" * 60)
     
     for file_data in problematic_files:
@@ -348,19 +348,19 @@ def generate_remediations_for_files(scored_files: list, repo_path: str, db_conn:
                 with open(full_path, 'r', encoding='utf-8') as f:
                     file_content = f.read()
             else:
-                print(f"  ⚠️  File not found: {full_path}")
+                print(f"  [!] File not found: {full_path}")
                 continue
         except Exception as e:
-            print(f"  ⚠️  Error reading file: {e}")
+            print(f"  [!] Error reading file: {e}")
             continue
         
         # Generate remediation
         try:
             output_path = generate_remediation(file_path, file_content, file_data, db_conn)
-            print(f"  ✅ Remediation saved: {output_path}")
+            print(f"  [+] Remediation saved: {output_path}")
             count += 1
         except Exception as e:
-            print(f"  ❌ Error generating remediation: {e}")
+            print(f"  [ERROR] Error generating remediation: {e}")
     
     print("-" * 60)
     return count

@@ -31,9 +31,19 @@ env/
 .DS_Store
 
 output/*.json
+output/*.md
 sample_reports/*.json
 bob_sessions/*.md
 bob_sessions/*.png
+
+# DriftGuard runtime data
+.driftguard/
+data/*.db
+logs/
+remediation/
+
+# Virtual environments
+.venv/
 
 .env
 .env.local

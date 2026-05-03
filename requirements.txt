@@ -5,6 +5,7 @@ jinja2
 python-multipart
 python-dotenv
 pytest
+httpx
 schedule
 requests
 weasyprint

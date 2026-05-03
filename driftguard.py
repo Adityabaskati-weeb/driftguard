@@ -17,6 +17,11 @@ from app.report_generator import generate_report, save_report
 from app.config import Config, get_output_report_path
 from app.exceptions import InvalidRepositoryError, GitOperationError
 
+from app.git_parser import get_file_diffs
+from app.bob_analyzer import batch_analyze
+from app.scorer import score_all_files
+from app.report_generator import generate_report, save_report, print_report_summary
+
 
 def main():
     """Main CLI entrypoint."""

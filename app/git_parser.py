@@ -16,7 +16,7 @@ except ImportError:
 
 
 # Supported file extensions
-SUPPORTED_EXTENSIONS = {'.py', '.js', '.ts', '.java'}
+SUPPORTED_EXTENSIONS = {'.py', '.js', '.ts', '.java', '.html', '.css'}
 
 # Language mapping
 EXTENSION_TO_LANGUAGE = {
@@ -24,6 +24,8 @@ EXTENSION_TO_LANGUAGE = {
     '.js': 'javascript',
     '.ts': 'typescript',
     '.java': 'java',
+    '.html': 'html',
+    '.css': 'css',
 }
 
 # Maximum lines for diff_text
@@ -235,3 +237,4 @@ if __name__ == '__main__':
     test_git_parser()
 
 # Made with Bob
+
